@@ -5,8 +5,7 @@ import SunCalc from 'suncalc';
 
 // --- Config ---
 const isMobile = window.innerWidth < 768;
-const TERRAIN_SIZE = 200;
-const TERRAIN_SEGMENTS = isMobile ? 128 : 256;
+// Terrain config moved to chunked system below
 const STAR_COUNT = isMobile ? 500 : 1500;
 const LAT = 25.6866, LNG = -100.3161; // Monterrey fallback
 let lat = LAT, lng = LNG;
@@ -30,7 +29,7 @@ renderer.toneMappingExposure = 1.0;
 container.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
 camera.position.set(30, 25, 50);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -38,7 +37,7 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.05;
 controls.maxPolarAngle = Math.PI / 2.1;
 controls.minDistance = 15;
-controls.maxDistance = 120;
+controls.maxDistance = 200;
 controls.target.set(0, 5, 0);
 controls.autoRotate = true;
 controls.autoRotateSpeed = 0.12; // ~5 min per rotation
@@ -125,29 +124,85 @@ function updateSkyTexture(topColor, botColor) {
   scene.background = skyTexture;
 }
 
-// --- Terrain ---
-const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS);
-terrainGeo.rotateX(-Math.PI / 2);
+// --- Chunked Terrain (infinite tiling) ---
+const CHUNK_SIZE = 100;
+const CHUNK_SEGS = isMobile ? 64 : 128;
+const GRID_RADIUS = 3; // 7x7 grid of chunks
+const GRID_SPAN = GRID_RADIUS * 2 + 1;
+
 const terrainMat = new THREE.MeshStandardMaterial({
   color: '#3d5c2e',
   roughness: 0.9,
   metalness: 0.0,
   flatShading: false,
 });
-const terrain = new THREE.Mesh(terrainGeo, terrainMat);
-scene.add(terrain);
 
-const terrainPositions = terrainGeo.attributes.position;
-const baseHeights = new Float32Array(terrainPositions.count);
-
-for (let i = 0; i < terrainPositions.count; i++) {
-  const x = terrainPositions.getX(i);
-  const z = terrainPositions.getZ(i);
-  const h = fbm(x * 0.008, z * 0.008) * 18 + fbm(x * 0.02, z * 0.02) * 5;
-  baseHeights[i] = h;
-  terrainPositions.setY(i, h);
+// Terrain height at any world position (deterministic from noise)
+function terrainHeight(wx, wz) {
+  return fbm(wx * 0.008, wz * 0.008) * 18 + fbm(wx * 0.02, wz * 0.02) * 5;
 }
-terrainGeo.computeVertexNormals();
+
+// Build a single chunk mesh at chunk grid coords (cx, cz)
+function buildChunk(cx, cz) {
+  const geo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SEGS, CHUNK_SEGS);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const baseHeights = new Float32Array(pos.count);
+  const originX = cx * CHUNK_SIZE;
+  const originZ = cz * CHUNK_SIZE;
+  for (let i = 0; i < pos.count; i++) {
+    const lx = pos.getX(i);
+    const lz = pos.getZ(i);
+    const wx = lx + originX;
+    const wz = lz + originZ;
+    const h = terrainHeight(wx, wz);
+    baseHeights[i] = h;
+    pos.setY(i, h);
+  }
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, terrainMat);
+  mesh.position.set(originX, 0, originZ);
+  mesh.userData = { cx, cz, baseHeights, originX, originZ };
+  return mesh;
+}
+
+// Chunk pool keyed by "cx,cz"
+const chunks = new Map();
+const terrainGroup = new THREE.Group();
+scene.add(terrainGroup);
+
+let lastCamChunkX = Infinity, lastCamChunkZ = Infinity;
+
+function updateChunks(camX, camZ) {
+  const ccx = Math.round(camX / CHUNK_SIZE);
+  const ccz = Math.round(camZ / CHUNK_SIZE);
+  if (ccx === lastCamChunkX && ccz === lastCamChunkZ) return;
+  lastCamChunkX = ccx;
+  lastCamChunkZ = ccz;
+
+  const needed = new Set();
+  for (let dx = -GRID_RADIUS; dx <= GRID_RADIUS; dx++) {
+    for (let dz = -GRID_RADIUS; dz <= GRID_RADIUS; dz++) {
+      // Circular-ish culling
+      if (dx * dx + dz * dz > (GRID_RADIUS + 0.5) * (GRID_RADIUS + 0.5)) continue;
+      const key = `${ccx + dx},${ccz + dz}`;
+      needed.add(key);
+      if (!chunks.has(key)) {
+        const mesh = buildChunk(ccx + dx, ccz + dz);
+        chunks.set(key, mesh);
+        terrainGroup.add(mesh);
+      }
+    }
+  }
+  // Remove chunks too far away
+  for (const [key, mesh] of chunks) {
+    if (!needed.has(key)) {
+      terrainGroup.remove(mesh);
+      mesh.geometry.dispose();
+      chunks.delete(key);
+    }
+  }
+}
 
 // Terrain colors
 const TERRAIN_NIGHT = new THREE.Color('#1a2a1a');
@@ -163,7 +218,7 @@ function getTerrainColor(h) {
 }
 
 // --- Water ---
-const waterGeo = new THREE.PlaneGeometry(TERRAIN_SIZE * 1.5, TERRAIN_SIZE * 1.5, 64, 64);
+const waterGeo = new THREE.PlaneGeometry(CHUNK_SIZE * GRID_SPAN * 2, CHUNK_SIZE * GRID_SPAN * 2, 64, 64);
 waterGeo.rotateX(-Math.PI / 2);
 const waterMat = new THREE.MeshStandardMaterial({
   color: '#1a4a6e',
@@ -297,16 +352,27 @@ function animate() {
   // --- Terrain color ---
   terrainMat.color.copy(getTerrainColor(h));
 
-  // --- Terrain animation (slow drift) ---
-  if (Math.floor(elapsed * 10) % 3 === 0) { // throttle
-    for (let i = 0; i < terrainPositions.count; i++) {
-      const x = terrainPositions.getX(i);
-      const z = terrainPositions.getZ(i);
-      const drift = noise3D(x * 0.01, z * 0.01, elapsed * 0.02) * 0.3;
-      terrainPositions.setY(i, baseHeights[i] + drift);
+  // --- Update terrain chunks based on camera ---
+  updateChunks(camera.position.x, camera.position.z);
+
+  // --- Terrain animation (slow drift on nearby chunks) ---
+  if (Math.floor(elapsed * 10) % 3 === 0) {
+    for (const [, mesh] of chunks) {
+      const dx = mesh.userData.originX - camera.position.x;
+      const dz = mesh.userData.originZ - camera.position.z;
+      // Only animate nearby chunks for performance
+      if (dx * dx + dz * dz > CHUNK_SIZE * CHUNK_SIZE * 4) continue;
+      const pos = mesh.geometry.attributes.position;
+      const bh = mesh.userData.baseHeights;
+      for (let i = 0; i < pos.count; i++) {
+        const wx = pos.getX(i) + mesh.userData.originX;
+        const wz = pos.getZ(i) + mesh.userData.originZ;
+        const drift = noise3D(wx * 0.01, wz * 0.01, elapsed * 0.02) * 0.3;
+        pos.setY(i, bh[i] + drift);
+      }
+      pos.needsUpdate = true;
+      mesh.geometry.computeVertexNormals();
     }
-    terrainGeo.attributes.position.needsUpdate = true;
-    terrainGeo.computeVertexNormals();
   }
 
   // --- Water animation ---
