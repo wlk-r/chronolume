@@ -287,11 +287,14 @@ const clockLabel = document.getElementById('clock-label');
 
 function updateClock(timeInfo) {
   const { now, sunTimes } = timeInfo;
-  const hh = String(now.getHours()).padStart(2, '0');
+  const hours24 = now.getHours();
+  const hours12 = hours24 % 12 || 12;
+  const ampm = hours24 < 12 ? 'AM' : 'PM';
+  const hh = String(hours12).padStart(2, '0');
   const mm = String(now.getMinutes()).padStart(2, '0');
   const ss = String(now.getSeconds()).padStart(2, '0');
   clockSeconds.textContent = ss;
-  clockTime.innerHTML = `${hh}:${mm}:<span id="clock-seconds">${ss}</span>`;
+  clockTime.innerHTML = `${hh}:${mm}:<span id="clock-seconds">${ss}</span> <span style="font-size:0.5em;opacity:0.7">${ampm}</span>`;
 
   // Next event label
   const nextSunrise = sunTimes.sunrise;
