@@ -291,7 +291,7 @@ function updateClock(timeInfo) {
   const mm = String(now.getMinutes()).padStart(2, '0');
   const ss = String(now.getSeconds()).padStart(2, '0');
   clockSeconds.textContent = ss;
-  clockTime.innerHTML = `${hh}:${mm}<span id="clock-seconds">${ss}</span>`;
+  clockTime.innerHTML = `${hh}:${mm}:<span id="clock-seconds">${ss}</span>`;
 
   // Next event label
   const nextSunrise = sunTimes.sunrise;
